@@ -10,67 +10,78 @@ Original file is located at
 # app.py
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
+
+st.set_page_config(layout="wide")
 
 @st.cache_data
 def load_data():
-    # Load every sheet, rename typos, tag with sheet name
+    # 1) Read all sheets
     xls = pd.read_excel("detaileddata.xlsx", sheet_name=None)
+
     frames = []
-    for sheet, df in xls.items():
-        df = df.copy()
-        if "Traget" in df.columns:
-            df = df.rename(columns={"Traget": "Target"})
-        df["Stakeholder"] = sheet
-        # keep only expected cols
-        frames.append(df[["Division", "Name", "Target", "Actual", "Stakeholder"]])
+    for stakeholder, df in xls.items():
+        tmp = df.copy()
+        # Rename typo’d column if needed
+        if "Traget" in tmp.columns:
+            tmp = tmp.rename(columns={"Traget": "Target"})
+        tmp["Stakeholder"] = stakeholder
+        frames.append(tmp[["Division","Name","Target","Actual","Stakeholder"]])
     full = pd.concat(frames, ignore_index=True)
-    # ensure ints
-    full["Target"] = full["Target"].astype(int)
-    full["Actual"] = full["Actual"].astype(int)
+
+    # 2) Clean and convert to integers
+    full["Target"] = full["Target"].fillna(0).astype(int)
+    full["Actual"] = full["Actual"].fillna(0).astype(int)
     full["Performance"] = full["Actual"] / full["Target"] * 100
     return full
 
 df = load_data()
 
+# ─── Sidebar filters ───────────────────────────────────────────────────
 st.sidebar.header("Filters")
 division = st.sidebar.selectbox("Division", sorted(df["Division"].unique()))
-stakeholder = st.sidebar.selectbox(
-    "Stakeholder",
-    sorted(df[df["Division"] == division]["Stakeholder"].unique()),
-)
+stake_opts = sorted(df[df["Division"]==division]["Stakeholder"].unique())
+stakeholder = st.sidebar.selectbox("Stakeholder", stake_opts)
 
+# ─── Title ─────────────────────────────────────────────────────────────
 st.title(f"{division} → {stakeholder} Dashboard")
 
-# Filtered subset
-sub = df[(df["Division"] == division) & (df["Stakeholder"] == stakeholder)]
+# ─── Filtered subset ───────────────────────────────────────────────────
+sub = df[(df["Division"]==division) & (df["Stakeholder"]==stakeholder)]
 
-# 1) Performance bar
-total_t = sub["Target"].sum()
-total_a = sub["Actual"].sum()
-perf = (total_a / total_t * 100) if total_t else 0
-color = "green" if perf >= 100 else "orange" if perf >= 70 else "red"
+if sub.empty:
+    st.warning("No data for that Division / Stakeholder combination.")
+    st.stop()
 
-fig = go.Figure(
-    go.Bar(
-        x=[stakeholder],
-        y=[perf],
-        marker_color=[color],
-        text=[f"{perf:.1f}%"],
-        textposition="auto",
-    )
+# ─── 1) Aggregated performance table ───────────────────────────────────
+agg = (
+    sub.groupby("Stakeholder")[["Target","Actual"]]
+       .sum()
+       .assign(Performance=lambda d: d.Actual/d.Target*100)
+       .reset_index()
 )
-fig.update_layout(
-    yaxis_title="Performance %",
-    yaxis=dict(range=[0, max(110, perf + 10)], ticksuffix="%"),
-    margin=dict(t=50, b=50),
-)
-st.plotly_chart(fig, use_container_width=True)
 
-# 2) Detailed table
-st.header("Detail: Names Under Stakeholder")
-st.dataframe(
-    sub[["Name", "Target", "Actual"]]
-    .assign(**{"Performance %": sub["Performance"].round(1).astype(str) + "%"}),
-    use_container_width=True,
+# Color map function
+def color_performance(val):
+    if val >= 100:
+        return "background-color: lightgreen"
+    if val >= 70:
+        return "background-color: lightgoldenrodyellow"
+    return "background-color: lightcoral"
+
+st.subheader("Aggregated Performance")
+# Use st.write to render a styled DataFrame
+styled = (
+    agg.style
+       .format({"Performance": "{:.2f}%"})
+       .applymap(color_performance, subset=["Performance"])
 )
+st.write(styled, unsafe_allow_html=True)
+
+# ─── 2) Detailed breakdown table ────────────────────────────────────────
+st.subheader("Detail: Items Under Stakeholder")
+detail = (
+    sub[["Name","Target","Actual"]]
+       .assign(**{"Performance %": sub["Performance"].round(1).astype(str)+"%"})
+       .rename(columns={"Name":"Item"})
+)
+st.dataframe(detail, use_container_width=True)
